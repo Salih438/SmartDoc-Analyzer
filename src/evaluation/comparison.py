@@ -3,8 +3,9 @@ src/evaluation/comparison.py
 ----------------------------
 Filtreleme ve eşikleme algoritmalarının tarafsız karşılaştırılması modülü.
 
-Filtrelerin (Gaussian, Median, Bilateral) ve eşikleme yöntemlerinin (Global, Otsu,
-Adaptive) çıktılarını, metriklerini (PSNR, SSIM) ve çalışma sürelerini derler.
+Filtrelerin (Gaussian, Median, Bilateral), eşikleme yöntemlerinin (Global, Otsu,
+Adaptive) ve aydınlatma iyileştirmelerinin çıktılarını/çalışma sürelerini derler.
+PSNR/SSIM yalnızca temiz referans görüntüsü sağlanan karşılaştırmalarda hesaplanır.
 """
 
 from __future__ import annotations
@@ -14,10 +15,32 @@ import numpy as np
 
 from src.utils.validation import validate_gray
 from src.preprocessing.filtering import gaussian_blur, median_blur, bilateral_filter
+from src.preprocessing.enhancement import (
+    apply_clahe,
+    contrast_stretch,
+    gamma_correction,
+    histogram_equalization,
+)
+from src.preprocessing.auto_parameters import (
+    AUTO_GAMMA_BRIGHT_MEAN,
+    AUTO_GAMMA_DARKEN,
+    AUTO_GAMMA_DARK_MEAN,
+    AUTO_GAMMA_LIGHTEN,
+)
 from src.segmentation.threshold import global_threshold, otsu_threshold, adaptive_threshold
 from src.evaluation.metrics import psnr, ssim, timed, foreground_ratio
 
 _validate_gray = validate_gray
+def _gamma_auto(gray: np.ndarray) -> tuple[np.ndarray, str, dict[str, float]]:
+    """Ortalama parlaklığa göre gamma seçer ve seçimi raporlar."""
+    mean = float(gray.astype(np.float64).mean())
+    if mean < AUTO_GAMMA_DARK_MEAN:
+        gamma = AUTO_GAMMA_LIGHTEN
+    elif mean > AUTO_GAMMA_BRIGHT_MEAN:
+        gamma = AUTO_GAMMA_DARKEN
+    else:
+        gamma = 1.0
+    return gamma_correction(gray, gamma), "gamma", {"gamma": gamma, "mean": mean}
 
 
 def compare_filters(
@@ -103,4 +126,41 @@ def compare_thresholds(
         "threshold_val": None,
     }
 
+    return results
+
+
+def compare_enhancements(gray: np.ndarray) -> dict[str, dict[str, Any]]:
+    """İyileştirme yöntemlerini aynı gri görüntüde çıktı ve süreyle karşılaştırır.
+
+    Temiz referans verilmediğinden PSNR/SSIM hesaplanmaz; yalnızca yöntem
+    çıktısı ve süre döndürülür. Otomatik gamma, ortalama parlaklık eşiklerini
+    kullanır ve seçilen gamma değerini parametrelerde bildirir.
+    """
+    validate_gray(gray, "compare_enhancements")
+    methods = {
+        "none": (lambda: gray.copy(), {}),
+        "contrast_stretch": (lambda: contrast_stretch(gray), {"low_pct": 2, "high_pct": 98}),
+        "gamma_auto": (lambda: _gamma_auto(gray), {"mode": "brightness_based"}),
+        "gamma_0.6": (lambda: gamma_correction(gray, 0.6), {"gamma": 0.6}),
+        "gamma_0.8": (lambda: gamma_correction(gray, 0.8), {"gamma": 0.8}),
+        "gamma_1.2": (lambda: gamma_correction(gray, 1.2), {"gamma": 1.2}),
+        "gamma_1.6": (lambda: gamma_correction(gray, 1.6), {"gamma": 1.6}),
+        "gamma_2.0": (lambda: gamma_correction(gray, 2.0), {"gamma": 2.0}),
+        "clahe_1.0": (lambda: apply_clahe(gray, clip_limit=1.0), {"clip_limit": 1.0}),
+        "clahe_2.0": (lambda: apply_clahe(gray, clip_limit=2.0), {"clip_limit": 2.0}),
+        "clahe_4.0": (lambda: apply_clahe(gray, clip_limit=4.0), {"clip_limit": 4.0}),
+        "histogram_equalization": (lambda: histogram_equalization(gray), {}),
+    }
+    results: dict[str, dict[str, Any]] = {}
+    for name, (operation, parameters) in methods.items():
+        output, duration = timed(operation)
+        selected_parameters = dict(parameters)
+        if name == "gamma_auto":
+            output, selected, auto_parameters = output
+            selected_parameters = {"selected_method": selected, **auto_parameters}
+        results[name] = {
+            "image": output,
+            "duration_ms": duration,
+            "parameters": selected_parameters,
+        }
     return results

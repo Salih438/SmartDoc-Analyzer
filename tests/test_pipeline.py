@@ -9,7 +9,7 @@ import pytest
 
 from src.evaluation.scenes import SCENARIOS, make_scene
 from src.analysis.image_info import save_image
-from src.pipeline import PipelineConfig, process_file, process_image
+from src.pipeline import PipelineConfig, process_file, process_image, select_ocr_input
 
 
 def _document() -> np.ndarray:
@@ -27,6 +27,18 @@ def test_pipeline_frontal_returns_binary_and_preserves_input() -> None:
     assert result.binary is not None
     assert set(np.unique(result.binary)).issubset({0, 255})
     assert np.array_equal(scene, original)
+
+
+def test_pipeline_retains_rectified_color_image_separately_from_ocr_binary() -> None:
+    scene, _ = make_scene(_document(), "frontal_easy", seed=12)
+    result = process_image(scene, PipelineConfig(binarize="otsu"))
+
+    assert result.rectified
+    assert result.rectified_image is not None
+    assert result.rectified_image.ndim == 3
+    assert result.rectified_image.shape[2] == 3
+    assert result.binary is not None
+    assert set(np.unique(result.binary)) <= {0, 255}
 
 
 def test_not_found_warns_and_does_not_warp_without_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -117,6 +129,34 @@ def test_invalid_pipeline_config_raises() -> None:
         PipelineConfig(enhance="histogram")  # type: ignore[arg-type]
 
 
+def test_ocr_input_selection_and_binary_to_gray_fallback() -> None:
+    scene, _ = make_scene(_document(), "frontal_easy", seed=8)
+    binary_result = process_image(scene, PipelineConfig(ocr_source="binary"))
+    selected, actual = select_ocr_input(binary_result, PipelineConfig(ocr_source="binary"))
+    assert selected is not None and actual == "binary"
+    assert np.array_equal(selected, binary_result.binary)
+
+    gray_result = process_image(scene, PipelineConfig(binarize="none", ocr_source="binary"))
+    selected_gray, actual_gray = select_ocr_input(gray_result, PipelineConfig(ocr_source="binary"))
+    assert gray_result.binary is None
+    assert selected_gray is not None and actual_gray == "gray"
+    assert np.array_equal(selected_gray, gray_result.gray)
+
+    denoised_result = process_image(
+        scene, PipelineConfig(denoise="median", ocr_source="denoised")
+    )
+    selected_denoised, actual_denoised = select_ocr_input(
+        denoised_result, PipelineConfig(ocr_source="denoised")
+    )
+    assert selected_denoised is not None and actual_denoised == "denoised"
+    assert np.array_equal(selected_denoised, denoised_result.denoised)
+
+
+def test_invalid_ocr_source_raises() -> None:
+    with pytest.raises(ValueError, match="ocr_source"):
+        PipelineConfig(ocr_source="color")  # type: ignore[arg-type]
+
+
 def test_scaled_kernel_changes_with_resolution() -> None:
     small = np.full((450, 330, 3), 255, dtype=np.uint8)
     large = np.full((2200, 1650, 3), 255, dtype=np.uint8)
@@ -139,7 +179,7 @@ def test_scaled_kernel_changes_with_resolution() -> None:
 def test_auto_rules_use_synthetic_brightness_contrast_and_noise() -> None:
     from src.pipeline import _enhance_auto
 
-    low_contrast = np.full((120, 160), 140, dtype=np.uint8)
+    low_contrast = np.full((120, 160), 220, dtype=np.uint8)
     _, selected, _ = _enhance_auto(low_contrast)
     assert selected == "stretch"
 
@@ -152,6 +192,31 @@ def test_auto_rules_use_synthetic_brightness_contrast_and_noise() -> None:
     denoise_step = next(step for step in result.steps if step["ad"] == "denoise")
     assert denoise_step["parametreler"]["method"] == "median+bilateral"
     assert "noise_sigma_estimate" in denoise_step["parametreler"]
+
+
+def test_auto_enhancement_checks_darkness_before_low_contrast() -> None:
+    from src.pipeline import _enhance_auto
+
+    dark_low_contrast = np.full((80, 100), 150, dtype=np.uint8)
+    enhanced, selected, parameters = _enhance_auto(dark_low_contrast)
+
+    assert selected == "gamma"
+    assert parameters["gamma"] == 1.4
+    assert not np.array_equal(enhanced, dark_low_contrast)
+
+
+def test_auto_denoise_logs_both_filters_for_moderate_noise(monkeypatch) -> None:
+    import src.pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "_noise_sigma", lambda _gray: 2.0)
+    image = np.full((120, 160), 180, dtype=np.uint8)
+    result = process_image(
+        image,
+        PipelineConfig(detect=False, allow_unrectified=True, denoise="auto", binarize="none"),
+    )
+
+    step = next(item for item in result.steps if item["ad"] == "denoise")
+    assert step["parametreler"]["method"] == "median+bilateral"
 
 
 def test_process_file_supports_unicode_directory(tmp_path: Path) -> None:

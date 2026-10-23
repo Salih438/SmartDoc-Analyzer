@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 import sys
 
@@ -92,13 +93,14 @@ def _fallback_area_sweep(doc: np.ndarray) -> list[dict[str, object]]:
                 or np.any(detection.corners[:, 0] >= width - 1 - margin)
                 or np.any(detection.corners[:, 1] >= height - 1 - margin)
             )
-        candidate_valid = detection.status == "ok" and detection.corners is not None and error_ratio < 0.02 and overlap > 0.90
+        candidate_valid = detection.corners is not None and error_ratio < 0.02 and overlap > 0.90
         gate_accepts = candidate_valid and not touches_frame and actual_area <= 0.75
         rows.append({
             "Alan_hedef": f"{requested_area:.2f}", "Alan_gercek": f"{actual_area:.5f}",
             "Durum": detection.status, "Dogru_aday": candidate_valid,
             "Sinira_yakin": touches_frame, "Fallback_75_kabul": gate_accepts,
             "Yanlis_ret": candidate_valid and not gate_accepts,
+            "Yanlis_ret_alan_kapisi": candidate_valid and not touches_frame and actual_area > 0.75,
             "KoseHata_oran": f"{error_ratio:.6f}", "IoU": f"{overlap:.6f}",
             "Skor": f"{detection.score:.6f}",
         })
@@ -107,8 +109,6 @@ def _fallback_area_sweep(doc: np.ndarray) -> list[dict[str, object]]:
 
 def run() -> None:
     results = ROOT / "results"
-    prior_score_path = results / "detection_score_samples.csv"
-    prior_score_rows = _read(prior_score_path) if prior_score_path.exists() else []
     detection = _read(results / "detection_metrics.csv")
     contrast = _read(results / "detection_contrast_trials.csv")
     fallback = _read(results / "detection_fallback_trials.csv")
@@ -123,33 +123,45 @@ def run() -> None:
     doc = _detection_document()
     area_rows = _fallback_area_sweep(doc)
     _write(results / "fallback_area_sweep.csv", area_rows)
+    eligible = [row for row in area_rows if row["Dogru_aday"] and not row["Sinira_yakin"]]
+    area_rejections = sum(bool(row["Yanlis_ret_alan_kapisi"]) for row in eligible)
+    area_summary = [{
+        "Alan_siniri": 0.75, "Temiz_tek_belge_dogru_aday_sinir_ici": len(eligible),
+        "Alan_nedeniyle_yanlis_ret": area_rejections,
+        "Yanlis_ret_orani": f"{area_rejections / max(1, len(eligible)):.6f}",
+        "Alan_sinirini_asip_yaklasmayan_aday": sum(
+            bool(row["Dogru_aday"] and float(row["Alan_gercek"]) > 0.75 and not row["Sinira_yakin"])
+            for row in area_rows
+        ),
+    }]
+    _write(results / "fallback_area_summary.csv", area_summary)
 
     score_rows = []
     for row in detection:
-        if (row["Senaryo"] == "clutter" and row["Strateji"] == "threshold"):
+        if row["Senaryo"] in {"clutter", "clutter_highcontrast"}:
             score_rows.append({"Senaryo": row["Senaryo"], "Yöntem": row["Strateji"], "Seed": row["Seed"],
                                "Durum": row["Durum"], "Skor": row["Skor"],
                                "Skor_bilesenleri": row.get("Skor_bilesenleri", ""), "Aday_sahibi": row["Aday_sahibi"],
-                               "Belge_IoU": row["IoU"], "Clutter_IoU": row["Clutter_IoU"]})
+                               "Belge_IoU": row["IoU"], "KoseHata_oran": row["KoseHata_oran"],
+                               "Clutter_IoU": row["Clutter_IoU"]})
     for row in median:
         if row["Senaryo"] == "noisy_shadow" and row["Noise_sigma"] == "40.0" and row["Yontem"] == "raw":
             score_rows.append({"Senaryo": row["Senaryo"], "Yöntem": "canny/fixed raw σ40", "Seed": row["Seed"],
                                "Durum": row["Durum"], "Skor": row.get("Skor", ""),
-                               "Skor_bilesenleri": row.get("Skor_bilesenleri", ""), "Aday_sahibi": "", "Belge_IoU": row["IoU"], "Clutter_IoU": ""})
+                               "Skor_bilesenleri": row.get("Skor_bilesenleri", ""), "Aday_sahibi": "",
+                               "Belge_IoU": row["IoU"], "KoseHata_oran": row["KoseHata_oran"], "Clutter_IoU": ""})
     _write(results / "detection_score_samples.csv", score_rows)
 
-    before_lookup = {
-        (row.get("Senaryo", ""), row.get("Yöntem", ""), row.get("Seed", "")): row
-        for row in prior_score_rows
-    }
     validation_rows: list[dict[str, object]] = []
     for row in score_rows:
-        key = (str(row["Senaryo"]), str(row["Yöntem"]), str(row["Seed"]))
-        before = before_lookup.get(key, {})
+        components = json.loads(str(row["Skor_bilesenleri"] or "{}"))
+        score = float(row["Skor"] or 0.0)
+        # Reconstruct the previously used MIN_SCORE=.45 status from the saved score.
+        old_status = "not_found" if not components else ("ok" if score >= 0.45 else "low_confidence")
         validation_rows.append({
             "Senaryo": row["Senaryo"], "Yöntem": row["Yöntem"], "Seed": row["Seed"],
-            "Durum_once": before.get("Durum", "önceki ölçüm yok"),
-            "Skor_once": before.get("Skor", ""), "Durum_sonra": row["Durum"],
+            "Durum_once_MIN_SCORE_0_45": old_status,
+            "Durum_sonra_MIN_SCORE_0_67_area_guard": row["Durum"],
             "Skor_sonra": row["Skor"], "KoseHata_oran_sonra": row.get("KoseHata_oran", ""),
             "IoU_sonra": row.get("Belge_IoU", ""), "Aday_sahibi": row.get("Aday_sahibi", ""),
         })
@@ -160,6 +172,9 @@ def run() -> None:
     for row in all_rows:
         print(" | ".join(f"{key}={value}" for key, value in row.items()))
     print("Temiz tek-belge alan taraması (fallback_area_sweep.csv):")
+    print("Alan kapısı özeti (fallback_area_summary.csv):")
+    for row in area_summary:
+        print(" | ".join(f"{key}={value}" for key, value in row.items()))
     for row in area_rows:
         print(" | ".join(f"{key}={value}" for key, value in row.items()))
     print("Tek değişkenli parlaklık kontrolü:")

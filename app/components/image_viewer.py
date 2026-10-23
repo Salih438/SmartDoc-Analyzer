@@ -27,4 +27,4 @@ def display_image(st, image: np.ndarray, caption: str, max_dimension: int = 1400
         shown = cv2.cvtColor(shown, cv2.COLOR_BGR2RGB)
     elif shown.shape[2] == 4:
         shown = cv2.cvtColor(shown, cv2.COLOR_BGRA2RGBA)
-    st.image(shown, caption=caption, use_column_width=True)
+    st.image(shown, caption=caption, width="stretch")

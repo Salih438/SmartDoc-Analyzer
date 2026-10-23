@@ -258,6 +258,7 @@ def run() -> None:
                     "Tespit_IoU": f"{detection_iou:.6f}",
                     "Auto_enhance": enhance_params.get("method", "") if name == "auto" else "",
                     "Auto_denoise": denoise_params.get("method", "") if name == "auto" else "",
+                    "Auto_binarize": config.binarize if name == "auto" else "",
                     "Noise_sigma_tahmin": denoise_params.get("noise_sigma_estimate", "") if name == "auto" else "",
                     "Parlaklik": f"{float(before.get('mean_brightness', float('nan'))):.4f}",
                     "Kontrast": f"{float(before.get('std_contrast', float('nan'))):.4f}",
@@ -275,6 +276,18 @@ def run() -> None:
 
     # Grouped display rows are computed from the saved config CSV, not source buffers.
     saved = _read_rows(config_csv)
+    tolerance_pairs = []
+    for row in saved:
+        tolerance_pairs.append({
+            "Senaryo": row["Senaryo"], "Seed": row["Seed"],
+            "Shadow_strength": row["Shadow_strength"], "Noise_sigma": row["Noise_sigma"],
+            "Konfigurasyon": row["Konfigurasyon"], "Durum": row["Durum"],
+            "F1_exact": row["Metin_F1"], "F1_tol1": row["Metin_F1_tolerans_1px"],
+            "Delta_tol1": f"{float(row['Metin_F1_tolerans_1px']) - float(row['Metin_F1']):.6f}",
+            "F1_tol2": row["Metin_F1_tolerans_2px"],
+            "Delta_tol2": f"{float(row['Metin_F1_tolerans_2px']) - float(row['Metin_F1']):.6f}",
+        })
+    _write_rows(output_dir / "pipeline_f1_tolerance_pairs.csv", tolerance_pairs)
     auto_rows = [row for row in saved if row["Konfigurasyon"] == "auto" and row["Noise_sigma_tahmin"]]
     noise_summary: list[dict[str, object]] = []
     for sigma in sorted({row["Noise_sigma"] for row in auto_rows}, key=float):
@@ -316,6 +329,7 @@ def run() -> None:
             "Metin_F1_ortalama": f"{np.mean([float(row['Metin_F1']) for row in successful]):.5f}" if successful else "",
             "Auto_enhance": ",".join(sorted({row["Auto_enhance"] for row in auto_rows if row["Auto_enhance"]})),
             "Auto_denoise": ",".join(sorted({row["Auto_denoise"] for row in auto_rows if row["Auto_denoise"]})),
+            "Auto_binarize": ",".join(sorted({row["Auto_binarize"] for row in auto_rows if row.get("Auto_binarize")})),
             "Noise_sigma_tahmin_ortalama": f"{np.mean([float(row['Noise_sigma_tahmin']) for row in auto_rows if row['Noise_sigma_tahmin']]):.3f}" if any(row["Noise_sigma_tahmin"] for row in auto_rows) else "",
             "Parlaklik_ortalama": f"{np.mean([float(row['Parlaklik']) for row in auto_rows]):.3f}" if auto_rows else "",
             "Kontrast_ortalama": f"{np.mean([float(row['Kontrast']) for row in auto_rows]):.3f}" if auto_rows else "",

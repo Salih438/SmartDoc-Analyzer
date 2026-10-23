@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import shutil
 import time
 from typing import Any
@@ -46,10 +47,11 @@ def is_available() -> bool:
         pytesseract = _pytesseract()
         pytesseract.get_tesseract_version()
         return True
-    except (RuntimeError, OSError):
+    except Exception:
         return False
 
 
+@lru_cache(maxsize=1)
 def available_languages() -> tuple[str, ...]:
     """Return installed Tesseract language codes, or raise a Turkish error."""
     pytesseract = _pytesseract()
@@ -69,7 +71,7 @@ def check_installation() -> dict[str, object]:
         languages = available_languages()
         result["languages"] = languages
         result["missing"] = [name for name in ("tur", "eng", "osd") if name not in languages]
-    except RuntimeError as exc:
+    except Exception as exc:
         result["error"] = str(exc)
     return result
 
@@ -124,7 +126,9 @@ def run_ocr(img: np.ndarray, lang: str = "tur+eng", psm: int = 6) -> OcrResult:
     return OcrResult(text, mean_conf, words, (time.perf_counter() - started) * 1000.0)
 
 
-def correct_orientation(img: np.ndarray) -> tuple[np.ndarray, str | None]:
+def correct_orientation(
+    img: np.ndarray, lang: str = "tur+eng"
+) -> tuple[np.ndarray, str | None]:
     """Use OSD first; if it cannot decide, choose rotation with highest OCR confidence."""
     pytesseract = _pytesseract()
     prepared = _ocr_image(img)
@@ -141,7 +145,7 @@ def correct_orientation(img: np.ndarray) -> tuple[np.ndarray, str | None]:
     scored: list[tuple[float, np.ndarray]] = []
     for candidate in rotations:
         try:
-            scored.append((run_ocr(candidate, lang="eng", psm=6).mean_conf, candidate))
+            scored.append((run_ocr(candidate, lang=lang, psm=6).mean_conf, candidate))
         except RuntimeError:
             scored.append((0.0, candidate))
     return max(scored, key=lambda item: item[0])[1], warning

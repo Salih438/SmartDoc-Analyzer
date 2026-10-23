@@ -45,28 +45,30 @@ def _run_one(
     shadow: float, sigma: float, seed: int, config: PipelineConfig,
 ) -> dict[str, object]:
     processed = process_image(image.copy(), config)
+    detection_status = processed.detection.status if config.detect else "uygulanmadi"
     if config.detect and (processed.detection.status != "ok" or not processed.rectified):
         return {"Senaryo": scenario, "Konfig": config_name, "Gölge": shadow, "Sigma": sigma,
                 "Seed": seed, "CER": "", "WER": "", "MeanConf": "", "Sure_ms": "",
-                "Durum": f"tespit_{processed.detection.status}"}
+                "Tespit_durumu": detection_status, "Durum": f"tespit_{processed.detection.status}"}
     source = processed.binary if processed.binary is not None else processed.gray
     if source is None:
         return {"Senaryo": scenario, "Konfig": config_name, "Gölge": shadow, "Sigma": sigma,
-                "Seed": seed, "CER": "", "WER": "", "MeanConf": "", "Sure_ms": "", "Durum": "çıktı_yok"}
+                "Seed": seed, "CER": "", "WER": "", "MeanConf": "", "Sure_ms": "",
+                "Tespit_durumu": detection_status, "Durum": "çıktı_yok"}
     if not is_available():
         return {"Senaryo": scenario, "Konfig": config_name, "Gölge": shadow, "Sigma": sigma,
                 "Seed": seed, "CER": "", "WER": "", "MeanConf": "", "Sure_ms": "",
-                "Durum": "tesseract_kurulu_değil"}
+                "Tespit_durumu": detection_status, "Durum": "tesseract_kurulu_değil"}
     try:
         result = run_ocr(source)
     except RuntimeError as exc:
         return {"Senaryo": scenario, "Konfig": config_name, "Gölge": shadow, "Sigma": sigma,
                 "Seed": seed, "CER": "", "WER": "", "MeanConf": "", "Sure_ms": "",
-                "Durum": f"ocr_hatası:{exc}"}
+                "Tespit_durumu": detection_status, "Durum": f"ocr_hatası:{exc}"}
     return {"Senaryo": scenario, "Konfig": config_name, "Gölge": shadow, "Sigma": sigma,
             "Seed": seed, "CER": f"{cer(truth, result.text):.6f}",
             "WER": f"{wer(truth, result.text):.6f}", "MeanConf": f"{result.mean_conf:.3f}",
-            "Sure_ms": f"{result.duration_ms:.3f}", "Durum": "ok"}
+            "Sure_ms": f"{result.duration_ms:.3f}", "Tespit_durumu": detection_status, "Durum": "ok"}
 
 
 def run() -> None:
@@ -92,7 +94,18 @@ def run() -> None:
                         conditioned = add_gaussian_noise(conditioned, sigma=sigma, seed=seed + 100)
                     input_bgr = cv2.cvtColor(conditioned, cv2.COLOR_GRAY2BGR)
                     for config_name, config in CONFIGS.items():
-                        rows.append(_run_one(input_bgr, truth, source_name, config_name, shadow, sigma, seed, config))
+                        active_config = config
+                        if source_name == "make_scene":
+                            active_config = PipelineConfig(
+                                detect=True, detection_strategy="canny", canny_mode="fixed",
+                                enhance=config.enhance, denoise=config.denoise,
+                                sharpen=config.sharpen, binarize=config.binarize,
+                                morphology=config.morphology,
+                            )
+                        rows.append(_run_one(
+                            input_bgr, truth, source_name, config_name, shadow, sigma, seed,
+                            active_config,
+                        ))
 
     for scenario in ("rotated_90", "rotated_30"):
         for seed in range(3):
@@ -102,7 +115,7 @@ def run() -> None:
                 pipeline = process_image(scene.copy(), config)
                 base = {"Senaryo": scenario, "Konfig": f"otsu_osd_{osd_enabled}", "Gölge": 0,
                         "Sigma": 0, "Seed": seed, "CER": "", "WER": "", "MeanConf": "",
-                        "Sure_ms": "", "Durum": "tespit_yok"}
+                        "Sure_ms": "", "Tespit_durumu": pipeline.detection.status, "Durum": "tespit_yok"}
                 if pipeline.detection.status == "ok" and pipeline.binary is not None and is_available():
                     try:
                         ocr_input = pipeline.binary
@@ -121,6 +134,26 @@ def run() -> None:
                 rows.append(base)
     output = ROOT / "results" / "ocr_experiments.csv"
     _write(output, rows)
+    saved = []
+    with output.open(newline="", encoding="utf-8") as handle:
+        saved = list(csv.DictReader(handle))
+    summary: list[dict[str, object]] = []
+    keys = ("Senaryo", "Konfig", "Gölge", "Sigma")
+    groups: dict[tuple[str, ...], list[dict[str, str]]] = {}
+    for row in saved:
+        groups.setdefault(tuple(row[key] for key in keys), []).append(row)
+    for key, group in sorted(groups.items()):
+        recognized = [row for row in group if row["Durum"] == "ok" and row["CER"]]
+        detection_rows = [row for row in group if row["Tespit_durumu"] != "uygulanmadi"]
+        summary.append({
+            **dict(zip(keys, key)), "N": len(group),
+            "OCR_ok_orani": f"{len(recognized) / len(group):.6f}",
+            "Tespit_ok_orani": f"{sum(row['Tespit_durumu'] == 'ok' for row in detection_rows) / len(detection_rows):.6f}" if detection_rows else "",
+            "CER_ortalama": f"{np.mean([float(row['CER']) for row in recognized]):.6f}" if recognized else "",
+            "WER_ortalama": f"{np.mean([float(row['WER']) for row in recognized]):.6f}" if recognized else "",
+            "MeanConf_ortalama": f"{np.mean([float(row['MeanConf']) for row in recognized]):.3f}" if recognized else "",
+        })
+    _write(ROOT / "results" / "ocr_experiments_summary.csv", summary)
     print(f"OCR deneyi: {len(rows)} satir; CSV={output}")
     if not is_available():
         print("Tesseract kurulu degil; OCR metrikleri bos ve durum tesseract_kurulu_degil.")

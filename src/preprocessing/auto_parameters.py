@@ -1,0 +1,8 @@
+"""Otomatik iyileştirme seçimlerinde ortak kullanılan sabitler."""
+
+AUTO_GAMMA_DARK_MEAN = 180.0
+AUTO_GAMMA_BRIGHT_MEAN = 235.0
+AUTO_GAMMA_LIGHTEN = 1.4
+AUTO_GAMMA_DARKEN = 0.8
+AUTO_LOW_CONTRAST_STD = 35.0
+AUTO_NOISE_SIGMA_THRESHOLD = 3.0

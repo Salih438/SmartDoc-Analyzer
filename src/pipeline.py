@@ -29,6 +29,14 @@ from src.document.detection import MAX_CONFIDENT_AREA_RATIO, DetectionResult, de
 from src.document.perspective import four_point_transform
 from src.evaluation.metrics import sharpness_laplacian_var
 from src.preprocessing.enhancement import apply_clahe, contrast_stretch, gamma_correction
+from src.preprocessing.auto_parameters import (
+    AUTO_GAMMA_BRIGHT_MEAN,
+    AUTO_GAMMA_DARKEN,
+    AUTO_GAMMA_DARK_MEAN,
+    AUTO_GAMMA_LIGHTEN,
+    AUTO_LOW_CONTRAST_STD,
+    AUTO_NOISE_SIGMA_THRESHOLD,
+)
 from src.preprocessing.filtering import bilateral_filter, median_blur
 from src.preprocessing.grayscale import to_grayscale
 from src.preprocessing.sharpening import unsharp_mask
@@ -42,18 +50,13 @@ MIN_FILTER_KERNEL = 3
 MAX_FILTER_KERNEL = 31
 MIN_ADAPTIVE_BLOCK = 3
 MAX_ADAPTIVE_BLOCK = 99
-AUTO_LOW_CONTRAST_STD = 35.0
-AUTO_DARK_MEAN = 90.0
-AUTO_BRIGHT_MEAN = 210.0
-AUTO_NOISE_SIGMA_THRESHOLD = 3.0
-AUTO_GAMMA_BRIGHTEN = 1.4
-AUTO_GAMMA_DARKEN = 0.8
 CONFIGURED_GAMMA = 1.2
 
 EnhanceMode = Literal["none", "auto", "stretch", "gamma", "clahe"]
 DenoiseMode = Literal["none", "auto", "median", "bilateral"]
 BinarizeMode = Literal["none", "otsu", "adaptive_mean", "adaptive_gaussian"]
 MorphologyMode = Literal["none", "opening", "closing", "open_close"]
+OcrSource = Literal["binary", "gray", "denoised"]
 
 
 @dataclass
@@ -71,6 +74,7 @@ class PipelineConfig:
     binarize: BinarizeMode = "otsu"
     morphology: MorphologyMode = "none"
     allow_unrectified: bool = False
+    ocr_source: OcrSource = "binary"
 
     def __post_init__(self) -> None:
         """Geçersiz pipeline seçimini çalışmaya başlamadan reddeder."""
@@ -82,6 +86,7 @@ class PipelineConfig:
             "sharpen": ("none", "unsharp"),
             "binarize": ("none", "otsu", "adaptive_mean", "adaptive_gaussian"),
             "morphology": ("none", "opening", "closing", "open_close"),
+            "ocr_source": ("binary", "gray", "denoised"),
         }
         for name, allowed in choices.items():
             if getattr(self, name) not in allowed:
@@ -107,6 +112,29 @@ class PipelineResult:
     info_before: dict[str, object] = field(default_factory=dict)
     info_after: dict[str, object] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    rectified_image: np.ndarray | None = None
+
+
+def select_ocr_input(
+    result: PipelineResult, config: PipelineConfig | None = None
+) -> tuple[np.ndarray | None, str]:
+    """Yapılandırılan ara görüntüyü OCR'a verir; bulunmazsa griye düşer.
+
+    ``binary`` seçiliyken binarize kapalıysa ve ``denoised`` görüntü yoksa
+    ``gray`` kullanılır. Dönüşte OCR'a verilecek görüntü ve fiili kaynak adı
+    döner; görüntü kopyalandığından sonuç dizisi değiştirilemez.
+    """
+    source = (config or PipelineConfig()).ocr_source
+    selected = {
+        "binary": result.binary,
+        "gray": result.gray,
+        "denoised": result.denoised,
+    }[source]
+    actual_source = source
+    if selected is None and source != "gray":
+        selected = result.gray
+        actual_source = "gray"
+    return (selected.copy() if selected is not None else None), actual_source
 
 
 def scale_odd_parameter(value: int, shape: tuple[int, ...], minimum: int, maximum: int) -> int:
@@ -149,12 +177,12 @@ def _enhance_auto(gray: np.ndarray) -> tuple[np.ndarray, str, dict[str, object]]
     info = get_image_info(gray)
     mean = float(info["mean_brightness"])
     contrast = float(info["std_contrast"])
+    if mean < AUTO_GAMMA_DARK_MEAN:
+        return gamma_correction(gray, AUTO_GAMMA_LIGHTEN), "gamma", {"gamma": AUTO_GAMMA_LIGHTEN, "mean": mean}
+    if mean > AUTO_GAMMA_BRIGHT_MEAN:
+        return gamma_correction(gray, AUTO_GAMMA_DARKEN), "gamma", {"gamma": AUTO_GAMMA_DARKEN, "mean": mean}
     if contrast < AUTO_LOW_CONTRAST_STD:
         return contrast_stretch(gray), "stretch", {"std_esik": AUTO_LOW_CONTRAST_STD, "std": contrast}
-    if mean < AUTO_DARK_MEAN:
-        return gamma_correction(gray, AUTO_GAMMA_BRIGHTEN), "gamma", {"gamma": AUTO_GAMMA_BRIGHTEN, "mean": mean}
-    if mean > AUTO_BRIGHT_MEAN:
-        return gamma_correction(gray, AUTO_GAMMA_DARKEN), "gamma", {"gamma": AUTO_GAMMA_DARKEN, "mean": mean}
     return gray.copy(), "none", {"mean": mean, "std": contrast}
 
 
@@ -288,10 +316,17 @@ def process_image(img: np.ndarray, config: PipelineConfig | None = None) -> Pipe
     )
 
     rectified = False
+    rectified_bgr: np.ndarray | None = None
     if cfg.detect and detection.status == "ok" and detection.corners is not None:
         started = time.perf_counter()
         working, _ = four_point_transform(original, detection.corners)
         rectified = True
+        if working.ndim == 2:
+            rectified_bgr = cv2.cvtColor(working, cv2.COLOR_GRAY2BGR)
+        elif working.shape[2] == 4:
+            rectified_bgr = cv2.cvtColor(working, cv2.COLOR_BGRA2BGR)
+        else:
+            rectified_bgr = working.copy()
         _record_step(steps, "rectify", {"output_shape": list(working.shape[:2])}, started)
     elif cfg.detect:
         warnings.append(f"Belge sınırı güvenilir biçimde tespit edilemedi ({detection.status}: {detection.reason}).")
@@ -340,7 +375,7 @@ def process_image(img: np.ndarray, config: PipelineConfig | None = None) -> Pipe
         denoised = bilateral_filter(denoised, d=diameter, sigma_color=75, sigma_space=75)
         denoise_parameters.update({"d": diameter, "sigma_color": 75, "sigma_space": 75})
     elif cfg.denoise == "auto" and noise_sigma is not None and noise_sigma >= AUTO_NOISE_SIGMA_THRESHOLD / 2:
-        denoise_choice = "median"
+        denoise_choice = "median+bilateral"
         denoised = median_blur(denoised, ksize=kernel)
         diameter = scale_odd_parameter(9, enhanced.shape, MIN_FILTER_KERNEL, MAX_FILTER_KERNEL)
         denoised = bilateral_filter(denoised, d=diameter, sigma_color=75, sigma_space=75)
@@ -386,7 +421,11 @@ def process_image(img: np.ndarray, config: PipelineConfig | None = None) -> Pipe
     started = time.perf_counter()
     info_after = _analysis_info(final_for_info)
     _record_step(steps, "analyze_after", {}, started)
-    return PipelineResult(original, rectified, gray, enhanced, denoised, binary, detection, steps, info_before, info_after, warnings)
+    return PipelineResult(
+        original, rectified, gray, enhanced, denoised, binary, detection,
+        steps, info_before, info_after, warnings,
+        rectified_image=rectified_bgr,
+    )
 
 
 def process_file(

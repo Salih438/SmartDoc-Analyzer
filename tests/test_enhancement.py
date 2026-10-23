@@ -16,6 +16,7 @@ import pytest
 from src.preprocessing.enhancement import (
     apply_clahe,
     contrast_stretch,
+    document_stretch,
     gamma_correction,
     histogram_equalization,
 )
@@ -75,6 +76,30 @@ class TestContrastStretch:
         bgr = np.zeros((50, 50, 3), dtype=np.uint8)
         with pytest.raises(ValueError):
             contrast_stretch(bgr)
+
+
+class TestDocumentStretch:
+    def test_white_point_stretch_handles_sparse_ink(self):
+        gray = np.full((100, 100), 150, dtype=np.uint8)
+        gray[:1, :] = 100
+
+        generic = contrast_stretch(gray)
+        document = document_stretch(gray)
+
+        np.testing.assert_array_equal(generic, gray)
+        assert document.min() == 0
+        assert document.max() == 255
+
+    def test_uniform_document_returns_copy(self):
+        gray = np.full((20, 30), 180, dtype=np.uint8)
+        result = document_stretch(gray)
+        assert result is not gray
+        np.testing.assert_array_equal(result, gray)
+
+    def test_invalid_percentiles_raise(self):
+        gray = np.full((20, 30), 180, dtype=np.uint8)
+        with pytest.raises(ValueError, match="low_pct"):
+            document_stretch(gray, low_pct=95, high_pct=2)
 
 
 # ---------------------------------------------------------------------------

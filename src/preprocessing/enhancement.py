@@ -95,6 +95,49 @@ def contrast_stretch(
     return np.clip(stretched, 0, 255).astype(np.uint8)
 
 
+def document_stretch(
+    gray: np.ndarray,
+    low_pct: float = 0.5,
+    high_pct: float = 95,
+) -> np.ndarray:
+    """Seyrek yazılı belgeler için yüzdelik beyaz-nokta gerdirmesi uygular.
+
+    Problem
+    -------
+    Yazı piksellerinin oranı düşük olduğunda genel amaçlı yüzdelik sınırlar
+    yalnızca beyaz kâğıt piksellerini seçip eşit sınırlara düşebilir.
+
+    Algoritma
+    ---------
+    Alt yüzdelik mürekkep/koyu uç, üst yüzdelik kâğıt beyaz noktası kabul edilir;
+    aralık doğrusal olarak [0, 255]'e taşınır. Sınırlar eşitse giriş kopyalanır.
+
+    Parametreler
+    ------------
+    gray : np.ndarray
+        uint8 iki boyutlu gri belge görüntüsü.
+    low_pct : float
+        Koyu uç için alt yüzdelik; varsayılan 0.5.
+    high_pct : float
+        Kâğıt beyaz noktası için üst yüzdelik; varsayılan 95.
+
+    Başarısız Olabilir
+    ------------------
+    Kâğıt pikselleri high_pct'den azsa beyaz nokta gölge/arka plan olabilir;
+    koyu kâğıt veya yoğun mürekkep varsayılan dağılım varsayımını bozar.
+    """
+    _validate_gray(gray, "document_stretch")
+    if not np.issubdtype(gray.dtype, np.integer) or gray.dtype != np.uint8:
+        raise TypeError("document_stretch: uint8 görüntü bekleniyor")
+    if not (0 <= low_pct < high_pct <= 100):
+        raise ValueError("document_stretch: 0 <= low_pct < high_pct <= 100 olmalıdır")
+    p_low, p_white = (float(value) for value in np.percentile(gray, [low_pct, high_pct]))
+    if p_white <= p_low:
+        return gray.copy()
+    stretched = (gray.astype(np.float64) - p_low) * (255.0 / (p_white - p_low))
+    return np.clip(np.rint(stretched), 0, 255).astype(np.uint8)
+
+
 # ---------------------------------------------------------------------------
 # 2. Gama Duzeltme (Gamma Correction)
 # ---------------------------------------------------------------------------
