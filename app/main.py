@@ -27,6 +27,7 @@ from src.pipeline import PipelineConfig, PipelineResult, process_image
 from src.preprocessing.grayscale import to_grayscale
 from src.preprocessing.filtering import median_blur
 from src.evaluation.metrics import sharpness_laplacian_var
+from src.ocr.engine import check_installation, correct_orientation, is_available, run_ocr
 
 
 @st.cache_data(show_spinner=False)
@@ -81,6 +82,11 @@ def _make_config() -> PipelineConfig:
         detect_denoise = st.checkbox(
             "Tespitten önce Median(5)", value=False, key="cfg_detect_denoise"
         )
+        detection_fallback = st.checkbox(
+            "Canny başarısızsa threshold yedeğini dene",
+            value=False,
+            key="cfg_detection_fallback",
+        )
         enhance = st.selectbox("İyileştirme", _literal_options("enhance"), key="cfg_enhance")
         denoise = st.selectbox("Gürültü azaltma", _literal_options("denoise"), key="cfg_denoise")
         sharpen = st.selectbox("Keskinleştirme", _literal_options("sharpen"), key="cfg_sharpen")
@@ -99,6 +105,7 @@ def _make_config() -> PipelineConfig:
         detection_strategy=strategy,
         canny_mode=canny_mode,
         detect_denoise=detect_denoise,
+        detection_fallback=detection_fallback,
         enhance=enhance,
         denoise=denoise,
         sharpen=sharpen,
@@ -202,7 +209,7 @@ def main() -> None:
     )
     config = _make_config()
 
-    tabs = st.tabs(("Analiz", "Tespit", "İşleme", "Karşılaştırma", "Dışa aktar"))
+    tabs = st.tabs(("Analiz", "Tespit", "İşleme", "Karşılaştırma", "Dışa aktar", "OCR"))
     if uploaded is None:
         with tabs[0]:
             st.info("Başlamak için PNG veya JPG/JPEG belge görüntüsü yükleyin.")
@@ -214,6 +221,8 @@ def main() -> None:
             st.info("Karşılaştırmalar için önce görüntü yükleyin.")
         with tabs[4]:
             st.info("İşleme sonrası PNG ve JSON indirilebilir.")
+        with tabs[5]:
+            st.info("OCR için bir görüntü yükleyin.")
         return
 
     payload = uploaded.getvalue()
@@ -280,6 +289,45 @@ def main() -> None:
             _render_result(st, current, config, source_stem)
         else:
             st.info("İndirme için önce pipeline çalıştırın.")
+
+    with tabs[5]:
+        if not is_available():
+            installation = check_installation()
+            st.info(str(installation.get("error", "Tesseract bulunamadı. OCR için Tesseract'ı kurup PATH'e ekleyin.")))
+        else:
+            language_status = check_installation()
+            missing_languages = language_status.get("missing", [])
+            if missing_languages:
+                st.warning(f"Eksik Tesseract dil verileri: {', '.join(missing_languages)}")
+            orient = st.checkbox("OCR öncesi yönü düzelt", value=True, key="ocr_orient")
+            if st.button("OCR çalıştır", key="run_ocr"):
+                try:
+                    current = st.session_state.get("pipeline_result")
+                    if current is None or st.session_state.get("pipeline_result_key") != (image_key, config_key):
+                        current = process_image(image.copy(), config)
+                    if current.binary is None:
+                        st.warning("İşlenecek ikili görüntü yok; tespit/işleme ayarlarını ve devam onayını kontrol edin.")
+                    else:
+                        ocr_image = current.binary
+                        orientation_warning = None
+                        if orient:
+                            ocr_image, orientation_warning = correct_orientation(ocr_image)
+                        ocr_result = run_ocr(ocr_image)
+                        st.session_state["ocr_result"] = ocr_result
+                        st.session_state["ocr_result_key"] = (image_key, config_key)
+                        st.session_state["ocr_warning"] = orientation_warning
+                except (RuntimeError, TypeError, ValueError, cv2.error) as exc:
+                    st.error(str(exc))
+            result_ocr = st.session_state.get("ocr_result")
+            if result_ocr is not None and st.session_state.get("ocr_result_key") == (image_key, config_key):
+                if st.session_state.get("ocr_warning"):
+                    st.warning(st.session_state["ocr_warning"])
+                st.metric("Ortalama OCR güveni", f"{result_ocr.mean_conf:.1f}")
+                st.text_area("Tanınan metin", value=result_ocr.text, height=220, key="ocr_text")
+                st.download_button(
+                    "Metni TXT indir", data=result_ocr.text.encode("utf-8"),
+                    file_name=f"{source_stem}_ocr.txt", mime="text/plain; charset=utf-8",
+                )
 
 
 if __name__ == "__main__":

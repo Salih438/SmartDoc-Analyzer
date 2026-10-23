@@ -8,7 +8,7 @@ import numpy as np
 from src.document.perspective import order_corners
 
 
-SCENARIOS = ("frontal_easy", "frontal_clean", "mild_tilt", "strong_perspective", "rotated_30", "rotated_45", "rotated_90", "low_contrast_bg", "low_contrast_hard", "low_contrast_hard_noisy", "dark_bg", "clutter", "partial_crop", "noisy_shadow")
+SCENARIOS = ("frontal_easy", "frontal_clean", "mild_tilt", "strong_perspective", "rotated_30", "rotated_45", "rotated_90", "low_contrast_bg", "low_contrast_hard", "low_contrast_hard_noisy", "dark_bg", "clutter", "clutter_highcontrast", "partial_crop", "noisy_shadow")
 
 
 def make_scene(doc: np.ndarray, scenario: str, seed: int) -> tuple[np.ndarray, np.ndarray]:
@@ -28,10 +28,15 @@ def make_scene(doc: np.ndarray, scenario: str, seed: int) -> tuple[np.ndarray, n
     base = 100 + (xx / w * 35 + yy / h * 20).astype(np.float32)
     noise = rng.normal(0, 8, (h, w)).astype(np.float32)
     scene_kind = "low_contrast_hard" if scenario == "low_contrast_hard_noisy" else scenario
-    bg_value = 205 if scene_kind in {"low_contrast_bg", "clutter", "low_contrast_hard"} else (35 if scene_kind == "dark_bg" else base + noise)
+    bg_value = 155 if scene_kind == "clutter_highcontrast" else (
+        205 if scene_kind in {"low_contrast_bg", "clutter", "low_contrast_hard"}
+        else (35 if scene_kind == "dark_bg" else base + noise)
+    )
     if scene_kind == "frontal_clean":
         bg_value = np.full((h, w), 120, dtype=np.uint8)
-    if scene_kind in {"low_contrast_bg", "clutter"}:
+    if scene_kind == "clutter_highcontrast":
+        source = np.where(source.astype(np.float32).mean(axis=2, keepdims=True) > 200, 185, source).astype(np.uint8)
+    elif scene_kind in {"low_contrast_bg", "clutter"}:
         source = np.where(source.astype(np.float32).mean(axis=2, keepdims=True) > 200, 235, source).astype(np.uint8)
     elif scene_kind == "low_contrast_hard":
         source = np.where(
@@ -69,9 +74,10 @@ def make_scene(doc: np.ndarray, scenario: str, seed: int) -> tuple[np.ndarray, n
     warped = cv2.warpPerspective(source, matrix, (w, h), borderMode=cv2.BORDER_REPLICATE)
     occupied = cv2.warpPerspective(np.full((sh, sw), 255, np.uint8), matrix, (w, h))
     scene = np.where(occupied[..., None] > 0, warped, bg)
-    if scene_kind == "clutter":
+    if scene_kind in {"clutter", "clutter_highcontrast"}:
         # Rectangle area is 501,600 px, larger than the nominal page quadrilateral.
-        cv2.rectangle(scene, (20, 100), (680, 860), (225, 225, 225), 5)
+        rectangle_value = 235 if scene_kind == "clutter_highcontrast" else 225
+        cv2.rectangle(scene, (20, 100), (680, 860), (rectangle_value,) * 3, 5)
     if scene_kind == "noisy_shadow":
         shadow = np.zeros((h, w), np.uint8)
         cv2.ellipse(shadow, (w // 2, h // 2), (260, 380), -25, 0, 360, 90, -1)

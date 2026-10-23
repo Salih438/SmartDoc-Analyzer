@@ -57,12 +57,12 @@ def _app_test():
 def test_streamlit_app_launches_and_uploaded_image_renders_tabs() -> None:
     app = _app_test().run()
     assert not app.exception
-    assert len(app.tabs) == 5
+    assert len(app.tabs) == 6
     app.file_uploader[0].set_value(("örnek.png", _encoded_image(), "image/png"))
     app.run(timeout=20)
     assert not app.exception
     assert any(element.value == "Belge sınırı tespiti" for element in app.subheader)
-    assert len(app.tabs) == 5
+    assert len(app.tabs) == 6
 
 
 def test_not_found_warns_and_pipeline_does_not_emit_output_without_opt_in() -> None:
@@ -87,3 +87,14 @@ def test_corrupt_upload_is_shown_as_streamlit_error_not_exception() -> None:
     assert not app.exception
     assert app.error
     assert "Desteklenmeyen" in app.error[0].value
+
+
+def test_ocr_tab_reports_missing_tesseract_without_crashing() -> None:
+    from src.ocr.engine import is_available
+
+    app = _app_test().run()
+    app.file_uploader[0].set_value(("örnek.png", _encoded_image(), "image/png"))
+    app.run(timeout=20)
+    assert not app.exception
+    if not is_available():
+        assert any("Tesseract" in item.value for item in app.info)

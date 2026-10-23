@@ -25,7 +25,7 @@ import cv2
 import numpy as np
 
 from src.analysis.image_info import get_image_info, load_image, save_image
-from src.document.detection import DetectionResult, detect_document
+from src.document.detection import MAX_CONFIDENT_AREA_RATIO, DetectionResult, detect_document
 from src.document.perspective import four_point_transform
 from src.evaluation.metrics import sharpness_laplacian_var
 from src.preprocessing.enhancement import apply_clahe, contrast_stretch, gamma_correction
@@ -62,6 +62,7 @@ class PipelineConfig:
 
     detect: bool = True
     detect_denoise: bool = False
+    detection_fallback: bool = False
     detection_strategy: Literal["canny", "threshold"] = "canny"
     canny_mode: Literal["fixed", "auto", "otsu"] = "fixed"
     enhance: EnhanceMode = "none"
@@ -87,6 +88,8 @@ class PipelineConfig:
                 raise ValueError(f"{name} geçersiz; desteklenenler: {', '.join(allowed)}")
         if not isinstance(self.detect_denoise, bool):
             raise ValueError("detect_denoise bool olmalıdır")
+        if not isinstance(self.detection_fallback, bool):
+            raise ValueError("detection_fallback bool olmalıdır")
 
 
 @dataclass
@@ -207,11 +210,82 @@ def process_image(img: np.ndarray, config: PipelineConfig | None = None) -> Pipe
             _record_step(steps, "detect_denoise", {"method": "median", "ksize": 5}, denoise_started)
         started = time.perf_counter()
         detection = detect_document(detection_input, strategy=cfg.detection_strategy, canny_mode=cfg.canny_mode)
+        if (
+            cfg.detection_fallback
+            and cfg.detection_strategy == "canny"
+            and detection.status != "ok"
+        ):
+            primary = detection
+            fallback_started = time.perf_counter()
+            fallback = detect_document(detection_input, strategy="threshold")
+            h, w = original.shape[:2]
+            fallback_area_ratio = 0.0
+            touches_frame = False
+            if fallback.corners is not None:
+                fallback_area_ratio = abs(
+                    float(cv2.contourArea(fallback.corners.astype(np.float32)))
+                ) / float(h * w)
+                margin = max(2.0, min(h, w) * 0.01)
+                touches_frame = bool(
+                    np.any(fallback.corners[:, 0] <= margin)
+                    or np.any(fallback.corners[:, 1] <= margin)
+                    or np.any(fallback.corners[:, 0] >= w - 1 - margin)
+                    or np.any(fallback.corners[:, 1] >= h - 1 - margin)
+                )
+            fallback_accepted = (
+                fallback.status == "ok"
+                and fallback.corners is not None
+                and not touches_frame
+                and fallback_area_ratio <= MAX_CONFIDENT_AREA_RATIO
+            )
+            if fallback_accepted:
+                detection = fallback
+                warnings.append("Canny tespiti başarısız oldu; threshold yedeği kullanıldı.")
+            else:
+                reason = (
+                    f"Canny başarısız ({primary.reason}); threshold yedeği güvenli aday vermedi"
+                )
+                if fallback.corners is not None:
+                    reason += (
+                        f" (kenar_yakını={touches_frame}, alan_oranı={fallback_area_ratio:.3f})"
+                    )
+                detection = DetectionResult(
+                    fallback.corners,
+                    "low_confidence" if fallback.corners is not None else "not_found",
+                    fallback.score,
+                    reason,
+                    "threshold_fallback",
+                    fallback.debug,
+                )
+            _record_step(
+                steps,
+                "detect_fallback",
+                {
+                    "primary": primary.strategy,
+                    "primary_status": primary.status,
+                    "fallback": "threshold",
+                    "fallback_status": fallback.status,
+                    "accepted": fallback_accepted,
+                    "area_ratio": fallback_area_ratio,
+                    "touches_frame": touches_frame,
+                },
+                fallback_started,
+            )
     else:
         started = time.perf_counter()
         detection = DetectionResult(None, "not_found", 0.0, "tespit devre dışı", cfg.detection_strategy)
         warnings.append("Belge tespiti yapılandırmada devre dışı bırakıldı.")
-    _record_step(steps, "detect", {"strategy": cfg.detection_strategy, "canny_mode": cfg.canny_mode, **(detection_parameters if cfg.detect else {})}, started)
+    _record_step(
+        steps,
+        "detect",
+        {
+            "strategy": cfg.detection_strategy,
+            "final_strategy": detection.strategy,
+            "canny_mode": cfg.canny_mode,
+            **(detection_parameters if cfg.detect else {}),
+        },
+        started,
+    )
 
     rectified = False
     if cfg.detect and detection.status == "ok" and detection.corners is not None:

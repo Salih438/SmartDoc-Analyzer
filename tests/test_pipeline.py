@@ -52,6 +52,26 @@ def test_allow_unrectified_continues_with_warning() -> None:
     assert result.gray is not None
 
 
+def test_detection_fallback_is_opt_in_and_threshold_can_recover_low_contrast() -> None:
+    scene, gt = make_scene(_document(), "low_contrast_bg", seed=0)
+    baseline = process_image(scene, PipelineConfig())
+    recovered = process_image(scene, PipelineConfig(detection_fallback=True))
+    assert baseline.detection.status != "ok"
+    assert recovered.detection.status == "ok"
+    assert recovered.detection.strategy == "threshold"
+    assert recovered.rectified is True
+    assert any(step["ad"] == "detect_fallback" for step in recovered.steps)
+
+
+@pytest.mark.parametrize("scenario", ["clutter", "partial_crop"])
+def test_detection_fallback_does_not_silently_accept_clutter_or_crop(scenario: str) -> None:
+    scene, _ = make_scene(_document(), scenario, seed=0)
+    result = process_image(scene, PipelineConfig(detection_fallback=True))
+    assert result.detection.status != "ok"
+    assert result.rectified is False
+    assert result.warnings
+
+
 def test_denoise_precedes_binarization() -> None:
     scene, _ = make_scene(_document(), "frontal_easy", seed=4)
     result = process_image(scene, PipelineConfig(denoise="median", binarize="otsu"))

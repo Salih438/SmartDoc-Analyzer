@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 import sys
 
@@ -108,6 +109,64 @@ def _corner_distances(gt: np.ndarray, pred: np.ndarray | None) -> tuple[list[flo
     return distances, float(np.mean(distances))
 
 
+def _write_clutter_diagnostic(doc: np.ndarray, result_dir: Path) -> None:
+    """Write clutter stage counts, competing areas, and per-strategy overlays."""
+    scene, gt = make_scene(doc, "clutter", 0)
+    height, width = scene.shape[:2]
+    clutter_corners = np.array(
+        [[20, 100], [680, 100], [680, 860], [20, 860]], dtype=np.float32
+    )
+    image_area = height * width
+    document_area = abs(float(cv2.contourArea(gt.astype(np.float32))))
+    clutter_area = abs(float(cv2.contourArea(clutter_corners)))
+    configurations = (
+        ("canny", "fixed"), ("canny", "auto"), ("canny", "otsu"), ("threshold", "fixed")
+    )
+    diagnostic_rows: list[dict[str, object]] = []
+    for strategy, mode in configurations:
+        result = detect_document(scene, strategy=strategy, canny_mode=mode)
+        predicted = result.corners
+        clutter_iou = quad_iou(clutter_corners, predicted, scene.shape[:2])
+        document_iou = quad_iou(gt, predicted, scene.shape[:2])
+        owner = "aday_yok"
+        if predicted is not None:
+            owner = "clutter" if clutter_iou > document_iou else "belge"
+        stages = result.debug.get("stages", {})
+        diagnostic_rows.append({
+            "Strateji": strategy,
+            "Mod": mode,
+            "Durum": result.status,
+            "Kenar": stages.get("edge_pixels", 0),
+            "Closing": stages.get("closing_pixels", 0),
+            "Kontur": stages.get("contours", 0),
+            "Alan_filtresi": stages.get("area_pass", 0),
+            "Hull": stages.get("hulls", 0),
+            "Approx_denemesi": stages.get("approx_attempts", 0),
+            "Approx_4_kose": stages.get("approx_four", 0),
+            "Skor_gecen": stages.get("score_pass", 0),
+            "Belge_alan_px": f"{document_area:.0f}",
+            "Belge_goruntu_orani": f"{document_area / image_area:.6f}",
+            "Buyuk_dikdortgen_alan_px": f"{clutter_area:.0f}",
+            "Dikdortgen_goruntu_orani": f"{clutter_area / image_area:.6f}",
+            "Aday_sahibi": owner,
+            "Belge_IoU": f"{document_iou:.6f}",
+            "Clutter_IoU": f"{clutter_iou:.6f}",
+            "Neden": result.reason,
+        })
+        overlay = scene.copy()
+        cv2.polylines(overlay, [np.rint(gt).astype(np.int32)], True, (0, 0, 255), 3)
+        cv2.polylines(overlay, [clutter_corners.astype(np.int32)], True, (255, 0, 0), 2)
+        if predicted is not None:
+            cv2.polylines(overlay, [np.rint(predicted).astype(np.int32)], True, (0, 255, 0), 3)
+        save_image(result_dir / f"clutter_{strategy}_{mode}.png", overlay)
+    with (ROOT / "results" / "clutter_diagnostic.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(diagnostic_rows[0]))
+        writer.writeheader()
+        writer.writerows(diagnostic_rows)
+
+
 def run() -> None:
     """Senaryo × strateji × Canny modu × seed ölçümlerini kaydeder."""
     result_dir = ROOT / "results" / "detection"
@@ -128,6 +187,14 @@ def run() -> None:
                     paper_mean = float(paper_pixels.mean()) if paper_pixels.size else float("nan")
                     background_pixels = gray_scene[page_mask == 0]
                     background_mean = float(background_pixels.mean()) if background_pixels.size else float("nan")
+                    paper_bright = gray_scene[(page_mask > 0) & (gray_scene > 170)]
+                    paper_for_delta = float(paper_bright.mean()) if paper_bright.size else paper_mean
+                    if scenario in {"clutter", "clutter_highcontrast"}:
+                        desk_value = float(gray_scene[5, 5])
+                        rectangle_value = float(gray_scene[500, 22])
+                    else:
+                        desk_value = background_mean
+                        rectangle_value = float("nan")
                     result, elapsed = timed_median(
                         detect_document,
                         scene,
@@ -141,7 +208,7 @@ def run() -> None:
                     expected = "reddet" if scenario == "partial_crop" else "tespit"
                     winner = "yok"
                     if result.corners is not None:
-                        if scenario == "clutter":
+                        if scenario in {"clutter", "clutter_highcontrast"}:
                             clutter_corners = np.array([[20, 100], [680, 100], [680, 860], [20, 860]], dtype=np.float32)
                             clutter_iou = quad_iou(clutter_corners, result.corners, scene.shape[:2])
                             h, w = scene.shape[:2]
@@ -169,7 +236,7 @@ def run() -> None:
                         except ValueError:
                             pass
                     save_image(result_dir / f"{scenario}_{strategy}_{mode}_{seed}.png", _overlay(scene, gt, result.corners))
-                    rows.append({"Senaryo": scenario, "Strateji": strategy, "CannyMode": mode, "Seed": seed, "Noise_sigma": 10 if scenario == "low_contrast_hard_noisy" else 0, "Beklenen": expected, "Durum": result.status, "Skor": f"{result.score:.5f}", "KoseHata_px": f"{error_px:.3f}", "KoseHata_oran": f"{error_ratio:.5f}", "Kose_mesafeleri_px": ";".join(f"{value:.2f}" for value in corner_distances), "Kose_mesafesi_ortalama_px": f"{corner_distance_mean:.3f}", "IoU": f"{iou:.5f}", "KoseHata_esik": 0.02, "IoU_esik": 0.90, "SSIM_duzeltilmis": f"{ssim:.5f}", "Sure_ms_medyan": f"{elapsed:.3f}", "Neden": result.reason, "Kenar_piksel": result.debug["stages"]["edge_pixels"], "Closing_piksel": result.debug["stages"]["closing_pixels"], "Kontur": result.debug["stages"]["contours"], "Alan_gecen": result.debug["stages"]["area_pass"], "Hull": result.debug["stages"]["hulls"], "Approx_denemesi": result.debug["stages"]["approx_attempts"], "Approx_4_kose": result.debug["stages"]["approx_four"], "Skor_gecen": result.debug["stages"]["score_pass"], "Skor_kalan": result.debug["stages"]["score_reject"], "Gri_fark": f"{abs(paper_mean-background_mean):.2f}", "Kenar_kagıt_medyan": f"{edge_measurements['paper_median']:.2f}", "Kenar_masa_medyan": f"{edge_measurements['desk_median']:.2f}", "Kenar_fark_medyan": f"{edge_measurements['boundary_delta']:.2f}", "Kenar_Sobel_medyan": f"{edge_measurements['boundary_sobel_median']:.3f}", "Kenar_Sobel_p90": f"{edge_measurements['boundary_sobel_p90']:.3f}", "Kenar_Sobel_max": f"{edge_measurements['boundary_sobel_max']:.3f}", "Arka_plan_Sobel_p90": f"{edge_measurements['background_sobel_p90']:.3f}", "Kagit_doku_Sobel_p90": f"{edge_measurements['paper_sobel_p90']:.3f}", "Arka_plan_std": f"{edge_measurements['background_std']:.3f}", "Kagit_doku_std": f"{edge_measurements['paper_texture_std']:.3f}", "GT_dis_kenar_pikseli": int(edge_measurements["localized_pixels"]), "GT_dis_kenar_orani": f"{edge_measurements['localized_ratio']:.5f}", "Aday_GT": "evet" if result.corners is not None and iou > 0.90 else "hayir", "Aday_sahibi": winner, "Clutter_IoU": f"{clutter_iou:.5f}"})
+                    rows.append({"Senaryo": scenario, "Strateji": strategy, "CannyMode": mode, "Seed": seed, "Noise_sigma": 10 if scenario == "low_contrast_hard_noisy" else 0, "Beklenen": expected, "Durum": result.status, "Skor": f"{result.score:.5f}", "Skor_bilesenleri": json.dumps(result.debug.get("selected_score_components", {}), ensure_ascii=False, sort_keys=True), "KoseHata_px": f"{error_px:.3f}", "KoseHata_oran": f"{error_ratio:.5f}", "Kose_mesafeleri_px": ";".join(f"{value:.2f}" for value in corner_distances), "Kose_mesafesi_ortalama_px": f"{corner_distance_mean:.3f}", "IoU": f"{iou:.5f}", "KoseHata_esik": 0.02, "IoU_esik": 0.90, "SSIM_duzeltilmis": f"{ssim:.5f}", "Sure_ms_medyan": f"{elapsed:.3f}", "Neden": result.reason, "Kenar_piksel": result.debug["stages"]["edge_pixels"], "Closing_piksel": result.debug["stages"]["closing_pixels"], "Kontur": result.debug["stages"]["contours"], "Alan_gecen": result.debug["stages"]["area_pass"], "Hull": result.debug["stages"]["hulls"], "Approx_denemesi": result.debug["stages"]["approx_attempts"], "Approx_4_kose": result.debug["stages"]["approx_four"], "Skor_gecen": result.debug["stages"]["score_pass"], "Skor_kalan": result.debug["stages"]["score_reject"], "Gri_fark": f"{abs(paper_mean-background_mean):.2f}", "Gri_fark_paper_masa": f"{abs(paper_for_delta-desk_value):.2f}", "Gri_fark_clutter_masa": f"{abs(rectangle_value-desk_value):.2f}" if np.isfinite(rectangle_value) else "", "Gri_fark_paper_clutter": f"{abs(paper_for_delta-rectangle_value):.2f}" if np.isfinite(rectangle_value) else "", "Kenar_kagıt_medyan": f"{edge_measurements['paper_median']:.2f}", "Kenar_masa_medyan": f"{edge_measurements['desk_median']:.2f}", "Kenar_fark_medyan": f"{edge_measurements['boundary_delta']:.2f}", "Kenar_Sobel_medyan": f"{edge_measurements['boundary_sobel_median']:.3f}", "Kenar_Sobel_p90": f"{edge_measurements['boundary_sobel_p90']:.3f}", "Kenar_Sobel_max": f"{edge_measurements['boundary_sobel_max']:.3f}", "Arka_plan_Sobel_p90": f"{edge_measurements['background_sobel_p90']:.3f}", "Kagit_doku_Sobel_p90": f"{edge_measurements['paper_sobel_p90']:.3f}", "Arka_plan_std": f"{edge_measurements['background_std']:.3f}", "Kagit_doku_std": f"{edge_measurements['paper_texture_std']:.3f}", "GT_dis_kenar_pikseli": int(edge_measurements["localized_pixels"]), "GT_dis_kenar_orani": f"{edge_measurements['localized_ratio']:.5f}", "Aday_GT": "evet" if result.corners is not None and iou > 0.90 else "hayir", "Aday_sahibi": winner, "Clutter_IoU": f"{clutter_iou:.5f}"})
     csv_path = ROOT / "results" / "detection_metrics.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
@@ -325,6 +392,7 @@ def run() -> None:
             "Tahmin_koseleri": np.array2string(polarity_result.corners, precision=1) if polarity_result.corners is not None else "None",
             "Neden": polarity_result.reason,
         })
+    _write_clutter_diagnostic(doc, result_dir)
     print(f"Ters polarite threshold: status={polarity_result.status}; Aday_sahibi={polarity_owner}; IoU={polarity_iou:.5f}")
     print(f"GT köşeleri: {polarity_gt.tolist()}")
     print(f"Tahmin köşeleri: {polarity_result.corners.tolist() if polarity_result.corners is not None else None}")

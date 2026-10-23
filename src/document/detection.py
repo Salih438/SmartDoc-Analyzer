@@ -14,7 +14,8 @@ FILL_WEIGHT = 0.20
 ANGLE_WEIGHT = 0.20
 EDGE_WEIGHT = 0.15
 BORDER_PENALTY = 0.50
-MIN_SCORE = 0.45
+MIN_SCORE = 0.67
+MAX_CONFIDENT_AREA_RATIO = 0.75
 
 
 @dataclass
@@ -39,7 +40,9 @@ def _angles_score(p: np.ndarray) -> float:
     return float(np.mean([max(0.0, 1.0 - abs(x - 90.0) / 30.0) for x in values]))
 
 
-def _candidate_score(p: np.ndarray, contour: np.ndarray, image_shape: tuple[int, int]) -> tuple[float, str]:
+def _candidate_score(
+    p: np.ndarray, contour: np.ndarray, image_shape: tuple[int, int]
+) -> tuple[float, str, dict[str, float]]:
     h, w = image_shape
     area_ratio = cv2.contourArea(p.reshape(-1, 1, 2)) / (w * h)
     contour_area = cv2.contourArea(contour)
@@ -48,9 +51,20 @@ def _candidate_score(p: np.ndarray, contour: np.ndarray, image_shape: tuple[int,
     opposite = min(edge_ratios[0], edge_ratios[2]) / max(edge_ratios[0], edge_ratios[2], 1e-6)
     opposite *= min(edge_ratios[1], edge_ratios[3]) / max(edge_ratios[1], edge_ratios[3], 1e-6)
     border = float(np.mean([(x <= 2 or y <= 2 or x >= w - 3 or y >= h - 3) for x, y in p]))
-    score = AREA_WEIGHT * min(1.0, area_ratio / 0.8) + FILL_WEIGHT * fill + ANGLE_WEIGHT * _angles_score(p) + EDGE_WEIGHT * opposite - BORDER_PENALTY * border
+    area_component = AREA_WEIGHT * min(1.0, area_ratio / 0.8)
+    fill_component = FILL_WEIGHT * fill
+    angle_component = ANGLE_WEIGHT * _angles_score(p)
+    opposite_component = EDGE_WEIGHT * opposite
+    border_component = BORDER_PENALTY * border
+    score = area_component + fill_component + angle_component + opposite_component - border_component
     reason = "görüntü sınırına yapışıyor" if border >= 0.5 else "geometrik skor yeterli"
-    return float(score), reason
+    return float(score), reason, {
+        "area_ratio": float(area_ratio), "fill": float(fill),
+        "angle_score": float(_angles_score(p)), "opposite_edge_score": float(opposite),
+        "border_fraction": float(border), "area_weighted": float(area_component),
+        "fill_weighted": float(fill_component), "angle_weighted": float(angle_component),
+        "opposite_weighted": float(opposite_component), "border_penalty": float(border_component),
+    }
 
 
 def detect_document(
@@ -111,7 +125,7 @@ def detect_document(
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8), iterations=2)
         edges = cv2.Canny(smooth, 50, 150)
     contours, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    candidates: list[tuple[float, np.ndarray, str]] = []
+    candidates: list[tuple[float, np.ndarray, str, dict[str, float]]] = []
     min_area = 0.10 * work.shape[0] * work.shape[1]
     stage = {
         "edge_pixels": int(np.count_nonzero(edges)),
@@ -139,8 +153,8 @@ def detect_document(
             if len(approx) == 4 and cv2.isContourConvex(approx):
                 stage["approx_four"] += 1
                 p = order_corners(approx.reshape(4, 2))
-                score, reason = _candidate_score(p, contour, work.shape)
-                candidates.append((score, p, reason))
+                score, reason, components = _candidate_score(p, contour, work.shape)
+                candidates.append((score, p, reason, components))
                 break
     best_candidate_score = max((candidate[0] for candidate in candidates), default=0.0)
     stage["score_pass"] = sum(candidate[0] >= MIN_SCORE for candidate in candidates)
@@ -156,10 +170,22 @@ def detect_document(
         else:
             reason = "aday_yok"
         return DetectionResult(None, "not_found", 0.0, reason, strategy, {"edges": edges, "mask": mask, "candidates": [], "stages": stage})
-    score, p, reason = max(candidates, key=lambda item: item[0])
+    score, p, reason, components = max(candidates, key=lambda item: item[0])
     original = p / scale
     status = "ok" if score >= MIN_SCORE else "low_confidence"
     if status != "ok":
         reason = f"skor eşik altında ({score:.3f}); {reason}"
         reason = "skor_esik_alti: " + reason
-    return DetectionResult(original.astype(np.float32), status, score, reason, strategy, {"edges": edges, "mask": mask, "candidates": [x[1] for x in candidates], "scale": scale, "stages": stage})
+    if components["area_ratio"] > MAX_CONFIDENT_AREA_RATIO:
+        status = "low_confidence"
+        reason = (
+            f"aday alanı görüntünün %{components['area_ratio'] * 100:.1f}'ini kaplıyor; "
+            f"güven sınırı %{MAX_CONFIDENT_AREA_RATIO * 100:.0f}"
+        )
+    return DetectionResult(
+        original.astype(np.float32), status, score, reason, strategy,
+        {"edges": edges, "mask": mask, "candidates": [x[1] for x in candidates],
+         "candidate_scores": [
+             {"score": item[0], "components": item[3]} for item in candidates
+         ], "selected_score_components": components, "scale": scale, "stages": stage},
+    )

@@ -22,9 +22,12 @@ def order_corners(pts: np.ndarray) -> np.ndarray:
     # atan2 sırası saat yönünün tersidir; dörtgeni saat yönüne çevir.
     if cv2.contourArea(ordered.reshape(-1, 1, 2), oriented=True) < 0:
         ordered = ordered[::-1]
-    # Sums tie for diagonally opposed corners at ±45°; topmost then leftmost
-    # gives a deterministic start independent of input ordering.
-    start = int(np.lexsort((ordered[:, 0], ordered[:, 1]))[0])
+    # Choose the visually upper-left origin by minimum x+y. At diagonal ties,
+    # topmost then leftmost is deterministic and independent of input order.
+    sums = ordered[:, 0] + ordered[:, 1]
+    minimum = float(np.min(sums))
+    candidates = np.flatnonzero(np.isclose(sums, minimum, atol=1e-4))
+    start = int(candidates[np.lexsort((ordered[candidates, 0], ordered[candidates, 1]))[0]])
     ordered = np.roll(ordered, -start, axis=0)
     return ordered.astype(np.float32)
 

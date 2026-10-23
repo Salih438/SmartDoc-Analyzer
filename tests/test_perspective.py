@@ -25,6 +25,14 @@ def test_output_size_and_transform() -> None:
     assert matrix.shape == (3, 3)
 
 
+def test_strong_perspective_corner_origin_preserves_portrait_aspect() -> None:
+    corners = np.array([[170, 120], [570, 80], [630, 820], [80, 850]], np.float32)
+    expected = np.array([[170, 120], [570, 80], [630, 820], [80, 850]], np.float32)
+    assert np.allclose(order_corners(corners[[2, 0, 3, 1]]), expected)
+    width, height = compute_output_size(corners)
+    assert width / height == pytest.approx(0.75, abs=0.08)
+
+
 @pytest.mark.parametrize("points", [np.zeros((4, 2)), [[0, 0], [1, 0], [0, 0], [1, 1]], [[0, 0], [2, 0], [1, 1], [0, 2]]])
 def test_degenerate_quads_raise(points: np.ndarray) -> None:
     with pytest.raises(ValueError):

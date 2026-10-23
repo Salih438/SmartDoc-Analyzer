@@ -103,6 +103,48 @@ def test_same_brightness_paper_and_background_is_not_found() -> None:
     assert result.status == "not_found"
 
 
+def test_detection_debug_exposes_selected_score_components() -> None:
+    from src.evaluation.scenes import make_scene
+    from scripts.run_detection_experiments import _detection_document
+
+    scene, _ = make_scene(_detection_document(), "frontal_easy", 0)
+    result = detect_document(scene, strategy="canny", canny_mode="fixed")
+    components = result.debug["selected_score_components"]
+    assert {"area_ratio", "fill", "angle_score", "opposite_edge_score", "border_fraction"} <= set(components)
+
+
+def test_noisy_shadow_sigma_40_wrong_high_score_is_not_silently_ok() -> None:
+    from scripts.run_experiments import create_synthetic_document
+    from src.evaluation.noise import add_gaussian_noise
+
+    document, _ = create_synthetic_document()
+    scene, _ = make_scene(document, "noisy_shadow", 0)
+    gray = cv2.cvtColor(scene, cv2.COLOR_BGR2GRAY)
+    noisy = add_gaussian_noise(gray, sigma=40, seed=400)
+    result = detect_document(noisy, strategy="canny", canny_mode="fixed")
+    assert result.score < 0.67
+    assert result.status == "low_confidence"
+
+
+def test_threshold_clutter_candidate_is_not_reported_as_confident_document() -> None:
+    from scripts.run_detection_experiments import _detection_document
+
+    scene, _ = make_scene(_detection_document(), "clutter", 0)
+    result = detect_document(scene, strategy="threshold")
+    assert result.corners is not None
+    assert result.status == "low_confidence"
+    assert "aday alanı" in result.reason
+
+
+@pytest.mark.parametrize("strategy,mode", [("canny", "fixed"), ("canny", "auto"), ("canny", "otsu"), ("threshold", "fixed")])
+def test_high_contrast_clutter_is_not_silently_reported_ok(strategy: str, mode: str) -> None:
+    from scripts.run_detection_experiments import _detection_document
+
+    scene, _ = make_scene(_detection_document(), "clutter_highcontrast", 0)
+    result = detect_document(scene, strategy=strategy, canny_mode=mode)
+    assert result.status != "ok"
+
+
 def test_small_document_and_dark_polarity_are_executed() -> None:
     small = np.full((400, 300), 80, np.uint8)
     small[170:230, 120:180] = 240
