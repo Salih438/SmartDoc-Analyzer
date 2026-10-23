@@ -58,6 +58,24 @@ def _aligned_gt_mask(
     )
 
 
+def _scene_text_ground_truth(
+    text_mask: np.ndarray, corners: np.ndarray, scene_shape: tuple[int, int]
+) -> np.ndarray:
+    """Place the binary document GT by geometry only, unaffected by scene light/noise."""
+    source_height, source_width = text_mask.shape[:2]
+    source = np.array(
+        [[0, 0], [source_width - 1, 0], [source_width - 1, source_height - 1], [0, source_height - 1]],
+        dtype=np.float32,
+    )
+    transform = cv2.getPerspectiveTransform(source, order_corners(corners).astype(np.float32))
+    height, width = scene_shape
+    warped = cv2.warpPerspective(
+        text_mask, transform, (width, height), flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+    )
+    return np.where(warped >= 128, 255, 0).astype(np.uint8)
+
+
 def _best_text_metrics(pred: np.ndarray | None, gt: np.ndarray) -> tuple[float, float, float]:
     if pred is None:
         return 0.0, 0.0, 0.0
@@ -140,11 +158,7 @@ def run() -> None:
     for scenario, shadow_strength, noise_sigma in CONDITIONS:
         for seed in SEEDS:
             scene, corners = make_scene(doc, scenario, seed)
-            mask_scene, _ = make_scene(text_mask, scenario, seed)
-            page_mask = np.zeros(scene.shape[:2], dtype=np.uint8)
-            cv2.fillPoly(page_mask, [np.rint(corners).astype(np.int32)], 255)
-            mask_gray = cv2.cvtColor(mask_scene, cv2.COLOR_BGR2GRAY)
-            scene_gt = np.where((mask_gray > 127) & (page_mask > 0), 255, 0).astype(np.uint8)
+            scene_gt = _scene_text_ground_truth(text_mask, corners, scene.shape[:2])
             input_bgr = _apply_condition(scene, seed, shadow_strength, noise_sigma)
 
             # Rectification is a detector/scene property, not a binarizer metric.

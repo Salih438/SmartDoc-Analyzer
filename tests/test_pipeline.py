@@ -76,6 +76,22 @@ def test_optional_detection_median_precedes_detector(monkeypatch: pytest.MonkeyP
     assert captured["image"].ndim == 2
 
 
+def test_pipeline_experiment_scene_gt_uses_geometry_not_shadow_or_noise() -> None:
+    from scripts.run_pipeline_experiments import _scene_text_ground_truth
+
+    document = np.full((300, 220), 245, dtype=np.uint8)
+    text_mask = np.zeros_like(document)
+    cv2.putText(document, "GT", (35, 160), cv2.FONT_HERSHEY_SIMPLEX, 2.0, 10, 4, cv2.LINE_AA)
+    cv2.putText(text_mask, "GT", (35, 160), cv2.FONT_HERSHEY_SIMPLEX, 2.0, 255, 4, cv2.LINE_8)
+    scene_a, corners_a = make_scene(document, "noisy_shadow", seed=1)
+    scene_b, corners_b = make_scene(document, "noisy_shadow", seed=2)
+    gt_a = _scene_text_ground_truth(text_mask, corners_a, scene_a.shape[:2])
+    gt_b = _scene_text_ground_truth(text_mask, corners_b, scene_b.shape[:2])
+    assert np.array_equal(corners_a, corners_b)
+    assert np.array_equal(gt_a, gt_b)
+    assert set(np.unique(gt_a)).issubset({0, 255})
+
+
 def test_invalid_pipeline_config_raises() -> None:
     with pytest.raises(ValueError, match="enhance"):
         PipelineConfig(enhance="histogram")  # type: ignore[arg-type]

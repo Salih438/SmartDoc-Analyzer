@@ -29,6 +29,16 @@ def _overlay(image: np.ndarray, gt: np.ndarray, pred: np.ndarray | None) -> np.n
     return result
 
 
+def _detection_document() -> np.ndarray:
+    """Create a small in-page label with margin from every paper boundary."""
+    doc = np.full((500, 360, 3), 245, np.uint8)
+    cv2.putText(
+        doc, "SMARTDOC", (100, 260), cv2.FONT_HERSHEY_SIMPLEX,
+        1.0, (20, 20, 20), 2, cv2.LINE_AA,
+    )
+    return doc
+
+
 def _boundary_measurements(
     gray: np.ndarray, edges: np.ndarray, gt: np.ndarray
 ) -> dict[str, float]:
@@ -102,8 +112,7 @@ def run() -> None:
     """Senaryo × strateji × Canny modu × seed ölçümlerini kaydeder."""
     result_dir = ROOT / "results" / "detection"
     result_dir.mkdir(parents=True, exist_ok=True)
-    doc = np.full((500, 360, 3), 245, np.uint8)
-    cv2.putText(doc, "SMARTDOC", (50, 180), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (20, 20, 20), 3, cv2.LINE_AA)
+    doc = _detection_document()
     rows: list[dict[str, object]] = []
     for scenario in SCENARIOS:
         for strategy in ("canny", "threshold"):

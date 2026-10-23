@@ -64,7 +64,9 @@ def make_scene(doc: np.ndarray, scenario: str, seed: int) -> tuple[np.ndarray, n
     elif scene_kind == "partial_crop":
         target += np.array([[-120, -100], [30, -70], [60, 60], [-130, 40]], np.float32)
     matrix = cv2.getPerspectiveTransform(np.array([[0, 0], [sw - 1, 0], [sw - 1, sh - 1], [0, sh - 1]], np.float32), target)
-    warped = cv2.warpPerspective(source, matrix, (w, h), borderValue=(0, 0, 0))
+    # Replicate paper pixels at the source boundary so black warp padding does
+    # not create an artificial high-contrast outline around the page.
+    warped = cv2.warpPerspective(source, matrix, (w, h), borderMode=cv2.BORDER_REPLICATE)
     occupied = cv2.warpPerspective(np.full((sh, sw), 255, np.uint8), matrix, (w, h))
     scene = np.where(occupied[..., None] > 0, warped, bg)
     if scene_kind == "clutter":

@@ -47,6 +47,16 @@ def test_exterior_edge_gradient_is_not_inflated_by_interior_text() -> None:
     assert with_text_metrics["boundary_sobel_max"] == without_text["boundary_sobel_max"]
 
 
+def test_synthetic_detector_label_does_not_touch_paper_boundary() -> None:
+    from scripts.run_detection_experiments import _detection_document, _boundary_measurements
+
+    doc = _detection_document()
+    scene, corners = make_scene(doc, "low_contrast_hard", seed=0)
+    gray = cv2.cvtColor(scene, cv2.COLOR_BGR2GRAY)
+    edge_stats = _boundary_measurements(gray, np.zeros_like(gray), corners)
+    assert edge_stats["boundary_sobel_p90"] < 100
+
+
 def test_uniform_image_is_not_found() -> None:
     result = detect_document(np.full((400, 300), 128, np.uint8))
     assert result.status == "not_found"
