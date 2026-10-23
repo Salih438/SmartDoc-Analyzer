@@ -59,11 +59,15 @@ def _boundary_measurements(
     gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
     magnitude = cv2.magnitude(gx, gy)
-    boundary_magnitude = magnitude[paper_band | desk_band]
+    exterior_edge_band = (page == 0) & (outside_distance <= 3.1)
+    boundary_magnitude = magnitude[exterior_edge_band]
     background_texture = magnitude[(page == 0) & (outside_distance > 3.1)]
-    paper_texture = magnitude[(page > 0) & (inside_distance > 3.1) & (gray > 128)]
+    text_pixels = ((page > 0) & (gray <= 128)).astype(np.uint8) * 255
+    text_neighborhood = cv2.dilate(text_pixels, np.ones((7, 7), np.uint8)) > 0
+    paper_texture_region = (page > 0) & (inside_distance > 3.1) & (gray > 128) & ~text_neighborhood
+    paper_texture = magnitude[paper_texture_region]
     background_values = gray[(page == 0) & (outside_distance > 3.1)]
-    paper_texture_values = gray[(page > 0) & (inside_distance > 3.1) & (gray > 128)]
+    paper_texture_values = gray[paper_texture_region]
     return {
         "paper_median": paper_median,
         "desk_median": desk_median,

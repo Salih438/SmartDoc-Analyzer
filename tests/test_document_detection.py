@@ -32,6 +32,21 @@ def test_detection_experiment_corner_distances_align_circular_order() -> None:
     assert distances == [0.0, 0.0, 0.0, 0.0]
 
 
+def test_exterior_edge_gradient_is_not_inflated_by_interior_text() -> None:
+    from scripts.run_detection_experiments import _boundary_measurements
+
+    gt = np.array([[15, 15], [85, 15], [85, 85], [15, 85]], dtype=np.float32)
+    plain = np.full((100, 100), 205, dtype=np.uint8)
+    cv2.fillPoly(plain, [gt.astype(np.int32)], 215)
+    with_text = plain.copy()
+    cv2.putText(with_text, "TEXT", (20, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.7, 20, 2)
+    edges = np.zeros_like(plain)
+    without_text = _boundary_measurements(plain, edges, gt)
+    with_text_metrics = _boundary_measurements(with_text, edges, gt)
+    assert with_text_metrics["boundary_sobel_p90"] == without_text["boundary_sobel_p90"]
+    assert with_text_metrics["boundary_sobel_max"] == without_text["boundary_sobel_max"]
+
+
 def test_uniform_image_is_not_found() -> None:
     result = detect_document(np.full((400, 300), 128, np.uint8))
     assert result.status == "not_found"
